@@ -11,10 +11,12 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
-        bool preview = args.Contains("--preview") || args.Contains("--smoke-test");
+        bool asyncSmokeTest = args.Contains("--async-smoke-test");
+        bool preview = args.Contains("--preview") || args.Contains("--smoke-test") || asyncSmokeTest;
         using var mutex = new Mutex(true, preview ? @"Local\LegionGoFanControl.Tray.Preview" : @"Local\LegionGoFanControl.Tray", out bool first);
-        if (!first) { if (args.Contains("--smoke-test")) Environment.ExitCode = 1; else MessageBox.Show("The fan controller is already running."); return; }
+        if (!first) { if (args.Contains("--smoke-test") || asyncSmokeTest) Environment.ExitCode = 1; else MessageBox.Show("The fan controller is already running."); return; }
         ApplicationConfiguration.Initialize();
+        if (asyncSmokeTest) SynchronizationContext.SetSynchronizationContext(new SynchronizationContext());
         if (args.Contains("--smoke-test"))
         {
             var boundary = new ControllerOptions { OnTemperature = 100, OffTemperature = 99.5, PollInterval = TimeSpan.FromTicks(TimeSpan.TicksPerSecond + 1), ReleaseCooldown = TimeSpan.FromTicks(1) };
@@ -24,7 +26,7 @@ internal static class Program
         }
         int snapshotIndex = Array.IndexOf(args, "--snapshot");
         string? snapshot = preview && snapshotIndex >= 0 && snapshotIndex + 1 < args.Length ? args[snapshotIndex + 1] : null;
-        Application.Run(new TrayContext(preview, args.Contains("--smoke-test"), args.Contains("--settings"), snapshot));
+        Application.Run(new TrayContext(preview, args.Contains("--smoke-test") || asyncSmokeTest, args.Contains("--settings"), snapshot, asyncSmokeTest));
     }
 }
 
@@ -44,6 +46,12 @@ internal sealed class TrayContext : ApplicationContext
     private readonly CancellationTokenSource cancellation = new();
     private readonly FanController controller;
     private readonly SynchronizationContext uiContext;
+    private readonly int uiThreadId;
+    private int statusUpdates;
+    private int settingsPaints;
+    private readonly uint nativeUiThreadId;
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
+    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr handle, out uint processId);
     private ControllerOptions options;
     private Task? loop;
     private readonly bool preview;
@@ -52,11 +60,12 @@ internal sealed class TrayContext : ApplicationContext
     private bool configValid = true;
     private string? lastError;
 
-    public TrayContext(bool preview, bool smokeTest, bool showSettings, string? snapshot)
+    public TrayContext(bool preview, bool smokeTest, bool showSettings, string? snapshot, bool asyncSmokeTest = false)
     {
-        this.preview = preview;
+        this.preview = preview; uiThreadId = Environment.CurrentManagedThreadId; nativeUiThreadId = GetCurrentThreadId();
         directory = preview ? Path.Combine(Path.GetTempPath(), "LegionGoFanControl-preview-" + Guid.NewGuid().ToString("N")) : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LegionGoFanControl");
-        uiContext = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
+        uiContext = new WindowsFormsSynchronizationContext();
+        SynchronizationContext.SetSynchronizationContext(uiContext);
         Directory.CreateDirectory(directory);
         log = new BoundedLog(LogPath);
         string? configError = null;
@@ -66,7 +75,7 @@ internal sealed class TrayContext : ApplicationContext
             options.Validate();
         }
         catch (Exception ex) { options = new(); configError = ex.Message; }
-        controller = new FanController(preview ? new PreviewHardware() : new LenovoFanHardware(), options);
+        controller = new FanController(asyncSmokeTest ? new AsyncPreviewHardware() : preview ? new PreviewHardware() : new LenovoFanHardware(), options);
         var menu = new ContextMenuStrip();
         menu.Items.Add(status); menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(auto); menu.Items.Add(manual); menu.Items.Add(firmware);
@@ -89,22 +98,28 @@ internal sealed class TrayContext : ApplicationContext
             Log("Invalid configuration: " + configError);
             MessageBox.Show("Invalid settings; control is paused. Fix settings before selecting a mode.\n\n" + configError, "Legion Go Fan Control", MessageBoxButtons.OK, MessageBoxIcon.Error);
             // Firmware mode performs no writes on a newly created controller.
-            loop = StartPausedAsync();
+            uiContext.Post(_ => loop = StartPausedAsync(), null);
         }
-        else loop = PollAsync(cancellation.Token);
+        else uiContext.Post(_ => loop = PollAsync(cancellation.Token), null);
         if (showSettings) uiContext.Post(_ => ShowSettings(), null);
                 if (smokeTest)
         {
+            int heartbeats = 0;
+            var heartbeat = new System.Windows.Forms.Timer { Interval = 100 };
+            heartbeat.Tick += (_, _) => heartbeats++; heartbeat.Start();
             var timer = new System.Windows.Forms.Timer { Interval = 1500 };
             timer.Tick += async (_, _) =>
             {
-                timer.Stop(); timer.Dispose();
+                timer.Stop(); timer.Dispose(); heartbeat.Stop(); heartbeat.Dispose();
                 try
                 {
+                    if (asyncSmokeTest && (statusUpdates < 1 || heartbeats < 3)) throw new InvalidOperationException("Async status update or UI heartbeat missing.");
                     if (showSettings)
                     {
                         var original = settingsForm ?? throw new InvalidOperationException("Settings did not open.");
                         if (!settingsShown || !original.Visible) throw new InvalidOperationException("Settings Shown event did not fire.");
+                        if (asyncSmokeTest && settingsPaints < 1) throw new InvalidOperationException("Settings did not paint.");
+                        if (GetWindowThreadProcessId(original.Handle, out _) != nativeUiThreadId) throw new InvalidOperationException("Settings window belongs to the wrong native thread.");
                         ShowSettings();
                         if (!ReferenceEquals(original, settingsForm) || Application.OpenForms.OfType<SettingsForm>().Count() != 1) throw new InvalidOperationException("Settings window was duplicated.");
 
@@ -150,6 +165,8 @@ internal sealed class TrayContext : ApplicationContext
     }
     private void UpdateStatus()
     {
+        if (Environment.CurrentManagedThreadId != uiThreadId) throw new InvalidOperationException("Status update occurred off the UI thread.");
+        statusUpdates++;
         var s = controller.Snapshot;
         string temperature = s.Temperature is double t ? $"{t:0.0} °C" : "temperature unavailable";
         status.Text = $"{temperature} | {s.State} | Full Speed: {(s.FullSpeed is null ? "unknown" : s.FullSpeed.Value ? "on" : "off")}";
@@ -160,6 +177,7 @@ internal sealed class TrayContext : ApplicationContext
     }
     private void ShowSettings()
     {
+        if (Environment.CurrentManagedThreadId != uiThreadId) throw new InvalidOperationException("Settings must be shown on the UI thread.");
         if (settingsForm is { IsDisposed: false })
         {
             if (settingsForm.WindowState == FormWindowState.Minimized) settingsForm.WindowState = FormWindowState.Normal;
@@ -169,6 +187,7 @@ internal sealed class TrayContext : ApplicationContext
         {
             settingsForm = new SettingsForm(options, !preview && StartupTask.IsEnabled(), !preview) { Icon = appIcon, SaveAsync = ApplySettingsAsync };
             settingsForm.Shown += (_, _) => settingsShown = true;
+            settingsForm.Paint += (_, _) => settingsPaints++;
             settingsForm.FormClosed += (_, _) => settingsForm = null;
             settingsForm.Show();
         }
@@ -253,3 +272,10 @@ internal sealed class PreviewHardware : IFanHardware
 
 
 
+
+internal sealed class AsyncPreviewHardware : IFanHardware
+{
+    public async Task<TemperatureSample> ReadTemperatureAsync(CancellationToken ct) { await Task.Delay(100, ct).ConfigureAwait(false); return new TemperatureSample(65, DateTimeOffset.UtcNow); }
+    public async Task<bool> ReadFullSpeedAsync(CancellationToken ct) { await Task.Delay(100, ct).ConfigureAwait(false); return false; }
+    public Task<FanWriteResult> SetFullSpeedAsync(bool enabled, CancellationToken ct) => throw new InvalidOperationException("Async smoke test cannot write hardware.");
+}
