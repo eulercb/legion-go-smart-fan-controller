@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>WinExe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><EnableWindowsTargeting>true</EnableWindowsTargeting><ApplicationIcon>fan.ico</ApplicationIcon><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup>
+  <ItemGroup><EmbeddedResource Include="fan.ico" /></ItemGroup><ItemGroup><ProjectReference Include="..\LegionGoFanControl.Core\LegionGoFanControl.Core.csproj" /><ProjectReference Include="..\LegionGoFanControl.Hardware\LegionGoFanControl.Hardware.csproj" /></ItemGroup>
+</Project>
+

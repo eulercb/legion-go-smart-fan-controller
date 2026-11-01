@@ -1,0 +1,40 @@
+{
+  "device": {
+    "model": "83E1",
+    "systemFamily": "Legion Go 8APU1",
+    "biosVersion": "N3CN40WW",
+    "smartFanMode": 255
+  },
+  "access": "Administrator token",
+  "test": {
+    "command": "test-full-speed --confirm-hardware-write",
+    "operatorApproved": true,
+    "initialFullSpeed": false,
+    "enableReadbackVerified": true,
+    "restoreReadbackVerified": true,
+    "exitCode": 0,
+    "consoleOutput": [
+      "Initial Full Speed: False",
+      "Enabled and verified. Restoring original state.",
+      "Restored and verified."
+    ]
+  },
+  "readOnlySnapshotBefore": {
+    "timestampUtc": "2026-11-01T20:39:56.0254344Z",
+    "cpuTemperatureGameZoneCelsius": 55,
+    "cpuTemperatureFeatureCelsius": 55,
+    "fullSpeedEnabled": false,
+    "fanSpeedFeatureRawUncalibrated": 4107
+  },
+  "readOnlySnapshotAfter": {
+    "timestampUtc": "2026-11-01T20:40:37.0852122Z",
+    "cpuTemperatureGameZoneCelsius": 53,
+    "cpuTemperatureFeatureCelsius": 53,
+    "fullSpeedEnabled": false,
+    "fanSpeedFeatureRawUncalibrated": 7409
+  },
+  "notes": [
+    "One manual write/readback/restore run; automatic thermal control and sustained load were not tested.",
+    "Temperature and raw fan values are point-in-time readings; raw fan feature values are not calibrated RPM."
+  ]
+}

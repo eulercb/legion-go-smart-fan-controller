@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/LegionGoFanControl.Diagnostics/LegionGoFanControl.Diagnostics.csproj" />
+    <Project Path="src/LegionGoFanControl.Hardware/LegionGoFanControl.Hardware.csproj" />
+    <Project Path="src/LegionGoFanControl.Tray/LegionGoFanControl.Tray.csproj" />
+  </Folder>
+  <Project Path="src/LegionGoFanControl.Core/LegionGoFanControl.Core.csproj" />
+  <Project Path="tests/LegionGoFanControl.Tests/LegionGoFanControl.Tests.csproj" />
+</Solution>

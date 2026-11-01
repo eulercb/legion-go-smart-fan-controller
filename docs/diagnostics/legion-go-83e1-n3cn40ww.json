@@ -1,0 +1,20 @@
+{
+  "timestampUtc": "2026-11-01T20:37:19.9424404Z",
+  "access": "Administrator token; Lenovo root\\WMI reads succeeded",
+  "model": "83E1",
+  "systemFamily": "Legion Go 8APU1",
+  "biosVersion": "N3CN40WW",
+  "readOnlyTelemetry": {
+    "cpuTemperatureGameZoneCelsius": 60,
+    "cpuTemperatureFeatureCelsius": 60,
+    "fullSpeedEnabled": false,
+    "fanSpeedFeatureRawUncalibrated": 4099,
+    "smartFanMode": 3
+  },
+  "writesTested": false,
+  "notes": [
+    "Point-in-time sample; readings vary with workload and power mode.",
+    "Raw fan feature value is not calibrated RPM.",
+    "Non-elevated Lenovo root\\WMI queries returned access denied; model and BIOS CIM queries succeeded."
+  ]
+}

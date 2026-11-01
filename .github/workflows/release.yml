@@ -1,0 +1,84 @@
+name: Portable release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build Release
+        run: dotnet build LegionGoFanControl.slnx -c Release
+      - name: Run simulated tests
+        run: dotnet run --project tests/LegionGoFanControl.Tests -c Release --no-build
+      - name: Smoke test the simulated tray
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath "src/LegionGoFanControl.Tray/bin/Release/net10.0-windows/LegionGoFanControl.Tray.exe" -ArgumentList '--smoke-test', '--settings' -PassThru
+          if (-not $process.WaitForExit(30000)) { $process.Kill(); throw 'Tray smoke test timed out.' }
+          if ($process.ExitCode -ne 0) { throw "Tray smoke test failed: $($process.ExitCode)" }
+      - name: Package portable apps
+        shell: pwsh
+        run: |
+          $version = "0.1.$env:GITHUB_RUN_NUMBER-ci.$env:GITHUB_RUN_ATTEMPT.$($env:GITHUB_SHA.Substring(0,12))"
+          ./scripts/package-portable.ps1 -OutputDirectory "$env:RUNNER_TEMP/portable-release" -Version $version -FileVersion "0.1.$env:GITHUB_RUN_NUMBER.0"
+          @{ version = $version; commit = $env:GITHUB_SHA } | ConvertTo-Json -Compress | Set-Content -Encoding utf8 "$env:RUNNER_TEMP/portable-release/release-metadata.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: portable-win-x64
+          path: |
+            ${{ runner.temp }}/portable-release/*.zip
+            ${{ runner.temp }}/portable-release/SHA256SUMS.txt
+            ${{ runner.temp }}/portable-release/release-metadata.json
+          if-no-files-found: error
+
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: portable-win-x64
+          path: release
+      - name: Create immutable commit-specific prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          COMMIT: ${{ github.sha }}
+          RUN_NUMBER: ${{ github.run_number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(jq -er '.version' release/release-metadata.json)
+          built_commit=$(jq -er '.commit' release/release-metadata.json)
+          test "$built_commit" = "$COMMIT"
+          [[ "$version" =~ ^0\.1\.${RUN_NUMBER}-ci\.[0-9]+\.${COMMIT:0:12}$ ]]
+          tag="v$version"
+          archive="LegionGoSmartFanControl-$version-win-x64.zip"
+          test -f "release/$archive"
+          (cd release && test "$(sha256sum "$archive")" = "$(cat SHA256SUMS.txt)")
+          if gh release view "$tag" > /dev/null 2>&1; then
+            echo "Release $tag already exists; refusing to replace or modify its assets." >&2
+            exit 1
+          fi
+          if ! gh api "repos/$GH_REPO/git/ref/tags/$tag" > /dev/null 2>&1; then
+            gh api --method POST "repos/$GH_REPO/git/refs" -f "ref=refs/tags/$tag" -f "sha=$COMMIT" > /dev/null
+          fi
+          actual=$(gh api "repos/$GH_REPO/git/ref/tags/$tag" --jq '.object.sha')
+          test "$actual" = "$COMMIT"
+          printf 'Automated build of commit %s. This prerelease has not been validated under live thermal stress.\n\nExtract the ZIP and read README.md before running.\n' "$COMMIT" > release-notes.txt
+          gh release create "$tag" "release/$archive" release/SHA256SUMS.txt --verify-tag --prerelease --latest=false --title "$tag" --notes-file release-notes.txt
