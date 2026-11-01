@@ -21,8 +21,9 @@ internal static class StartupTask
     }
     private static dynamic? Existing(dynamic folder)
     {
-        try { dynamic registered = folder.GetTask(Name); ValidateOwned(registered); return registered; }
-        catch (System.Runtime.InteropServices.COMException ex) when ((uint)ex.HResult == 0x80070002) { return null; }
+        object? registered = StartupTaskLookup.Find<object>(() => (object)folder.GetTask(Name));
+        if (registered is not null) ValidateOwned((dynamic)registered);
+        return registered;
     }
     public static bool IsEnabled() => Capture().Enabled;
     internal sealed record Snapshot(string? Xml, bool Enabled);
@@ -44,8 +45,8 @@ internal static class StartupTask
         dynamic? existing = Existing(folder);
         if (!enabled)
         {
-            try { folder.DeleteTask(Name, 0); }
-            catch (System.Runtime.InteropServices.COMException ex) when ((uint)ex.HResult == 0x80070002) { }
+            if (existing is not null)
+                StartupTaskLookup.Find<object>(() => { folder.DeleteTask(Name, 0); return new object(); });
             return;
         }
         string executable = Environment.ProcessPath ?? throw new InvalidOperationException("Cannot determine the executable path.");
@@ -68,6 +69,8 @@ internal static class StartupTask
         folder.RegisterTaskDefinition(Name, task, 6, null, null, 3, null); // create or update; interactive token
     }
 }
+
+
 
 
 

@@ -6,7 +6,7 @@ var tests = new (string, Func<Task>)[]
     ("threshold and continuous cooldown", Threshold), ("oscillation resets cooldown", Oscillation),
     ("sensor failures never release", SensorFailure), ("hung sensor stops access", HungSensor), ("failed write and readback", WriteFailures),
     ("external startup and interference", Ownership), ("prewrite ownership race", OwnershipRace), ("shutdown and resume", Lifecycle),
-    ("manual and firmware modes", Modes), ("validation", Validation), ("serialized access", Concurrent), ("bounded logging", Logging)
+    ("manual and firmware modes", Modes), ("validation", Validation), ("serialized access", Concurrent), ("bounded logging", Logging), ("missing startup task lookup", MissingStartupTask)
 };
 foreach (var (name, test) in tests)
 {
@@ -108,6 +108,21 @@ static Task Logging()
     finally { Directory.Delete(dir, true); }
     return Task.CompletedTask;
 }
+static Task MissingStartupTask()
+{
+    Exception[] missing = [new FileNotFoundException(), new System.Runtime.InteropServices.COMException("missing", unchecked((int)0x80070002)), new System.ComponentModel.Win32Exception(2)];
+    foreach (var ex in missing)
+        Check(StartupTaskLookup.Find<object>(() => throw ex) is null, "missing task should be disabled");
+    Exception[] errors = [new UnauthorizedAccessException(), new System.Runtime.InteropServices.COMException("access denied", unchecked((int)0x80070005)), new System.ComponentModel.Win32Exception(5), new InvalidOperationException("ownership")];
+    foreach (var ex in errors)
+    {
+        try { StartupTaskLookup.Find<object>(() => throw ex); throw new Exception("unexpected error suppressed"); }
+        catch (Exception caught) when (ReferenceEquals(caught, ex)) { }
+    }
+    var found = new object();
+    Check(ReferenceEquals(found, StartupTaskLookup.Find(() => found)), "existing task returned");
+    return Task.CompletedTask;
+}
 sealed class Clock : TimeProvider
 {
     private long seconds; public override DateTimeOffset GetUtcNow()=>new DateTimeOffset(2026,1,1,0,0,0,TimeSpan.Zero).AddSeconds(seconds);
@@ -120,6 +135,7 @@ sealed class Fake(Clock clock) : IFanHardware
     public Task<bool> ReadFullSpeedAsync(CancellationToken ct) { FanReads++; return Task.FromResult(On); }
     public Task<FanWriteResult> SetFullSpeedAsync(bool enabled,CancellationToken ct) { Writes++; if(FailWrite) throw new Exception("write failed"); if(RaceOn) { On=enabled; return Task.FromResult(FanWriteResult.AlreadyInRequestedState); } if(!Disagree) On=enabled; return Task.FromResult(FanWriteResult.Changed); }
 }
+
 
 
 
