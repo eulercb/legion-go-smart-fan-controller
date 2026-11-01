@@ -6,7 +6,7 @@ var tests = new (string, Func<Task>)[]
     ("threshold and continuous cooldown", Threshold), ("oscillation resets cooldown", Oscillation),
     ("sensor failures never release", SensorFailure), ("hung sensor stops access", HungSensor), ("failed write and readback", WriteFailures),
     ("external startup and interference", Ownership), ("prewrite ownership race", OwnershipRace), ("shutdown and resume", Lifecycle),
-    ("manual and firmware modes", Modes), ("validation", Validation), ("serialized access", Concurrent), ("bounded logging", Logging), ("missing startup task lookup", MissingStartupTask)
+    ("manual and firmware modes", Modes), ("validation", Validation), ("serialized access", Concurrent), ("bounded logging", Logging), ("missing startup task lookup", MissingStartupTask), ("startup task identity", StartupIdentity)
 };
 foreach (var (name, test) in tests)
 {
@@ -14,6 +14,23 @@ foreach (var (name, test) in tests)
     catch (Exception ex) { Console.Error.WriteLine($"FAIL {name}: {ex}"); Environment.ExitCode = 1; }
 }
 
+static Task StartupIdentity()
+{
+    const string sid = "S-1-5-21-1";
+    bool Owned(string? marker, string? principal, int logon, int count, string? path, Func<string, string?> resolve) => StartupTaskOwnership.IsOwned(marker, principal, logon, count, path, sid, resolve);
+    var marker = StartupTaskOwnership.Marker;
+    string? Resolve(string p) => p == "MACHINE\\user" ? sid : p;
+    Check(Owned(marker, sid, 3, 1, "LegionGoFanControl.Tray.exe", Resolve), "SID identity");
+    Check(Owned(marker, "MACHINE\\user", 3, 1, "LegionGoFanControl.Tray.exe", Resolve), "account identity");
+    Check(!Owned("foreign", "MACHINE\\user", 3, 1, "LegionGoFanControl.Tray.exe", Resolve), "foreign marker");
+    Check(!Owned(marker, "MACHINE\\user", 3, 1, "other.exe", Resolve), "foreign action");
+    Check(!Owned(marker, "MACHINE\\other", 3, 1, "LegionGoFanControl.Tray.exe", Resolve), "foreign principal");
+    Check(!Owned(marker, null, 3, 1, "LegionGoFanControl.Tray.exe", Resolve), "missing principal");
+    Check(!Owned(marker, sid, 2, 1, "LegionGoFanControl.Tray.exe", Resolve), "wrong logon type");
+    Check(!Owned(marker, sid, 3, 2, "LegionGoFanControl.Tray.exe", Resolve), "multiple actions");
+    Check(!Owned(marker, "unknown", 3, 1, "LegionGoFanControl.Tray.exe", _ => throw new InvalidOperationException()), "unresolved principal");
+    return Task.CompletedTask;
+}
 static void Check(bool value, string message) { if (!value) throw new Exception(message); }
 static (FanController c, Fake h, Clock clock) Setup(bool initial = false)
 {
@@ -135,9 +152,3 @@ sealed class Fake(Clock clock) : IFanHardware
     public Task<bool> ReadFullSpeedAsync(CancellationToken ct) { FanReads++; return Task.FromResult(On); }
     public Task<FanWriteResult> SetFullSpeedAsync(bool enabled,CancellationToken ct) { Writes++; if(FailWrite) throw new Exception("write failed"); if(RaceOn) { On=enabled; return Task.FromResult(FanWriteResult.AlreadyInRequestedState); } if(!Disagree) On=enabled; return Task.FromResult(FanWriteResult.Changed); }
 }
-
-
-
-
-
-

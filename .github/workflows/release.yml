@@ -28,6 +28,9 @@ jobs:
           $process = Start-Process -FilePath "src/LegionGoFanControl.Tray/bin/Release/net10.0-windows/LegionGoFanControl.Tray.exe" -ArgumentList '--smoke-test', '--async-smoke-test', '--settings' -PassThru
           if (-not $process.WaitForExit(30000)) { $process.Kill(); throw 'Tray smoke test timed out.' }
           if ($process.ExitCode -ne 0) { throw "Tray smoke test failed: $($process.ExitCode)" }
+          $process = Start-Process -FilePath "src/LegionGoFanControl.Tray/bin/Release/net10.0-windows/LegionGoFanControl.Tray.exe" -ArgumentList '--startup-conflict-smoke', '--settings' -PassThru
+          if (-not $process.WaitForExit(30000)) { $process.Kill(); throw 'Startup conflict smoke test timed out.' }
+          if ($process.ExitCode -ne 0) { throw "Startup conflict smoke test failed: $($process.ExitCode)" }
       - name: Package portable apps
         shell: pwsh
         run: |

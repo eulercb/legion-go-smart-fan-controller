@@ -11,7 +11,7 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
-        bool asyncSmokeTest = args.Contains("--async-smoke-test");
+        bool asyncSmokeTest = args.Contains("--async-smoke-test") || args.Contains("--startup-conflict-smoke");
         bool preview = args.Contains("--preview") || args.Contains("--smoke-test") || asyncSmokeTest;
         using var mutex = new Mutex(true, preview ? @"Local\LegionGoFanControl.Tray.Preview" : @"Local\LegionGoFanControl.Tray", out bool first);
         if (!first) { if (args.Contains("--smoke-test") || asyncSmokeTest) Environment.ExitCode = 1; else MessageBox.Show("The fan controller is already running."); return; }
@@ -26,7 +26,7 @@ internal static class Program
         }
         int snapshotIndex = Array.IndexOf(args, "--snapshot");
         string? snapshot = preview && snapshotIndex >= 0 && snapshotIndex + 1 < args.Length ? args[snapshotIndex + 1] : null;
-        Application.Run(new TrayContext(preview, args.Contains("--smoke-test") || asyncSmokeTest, args.Contains("--settings"), snapshot, asyncSmokeTest));
+        Application.Run(new TrayContext(preview, args.Contains("--smoke-test") || asyncSmokeTest, args.Contains("--settings"), snapshot, asyncSmokeTest, args.Contains("--startup-conflict-smoke")));
     }
 }
 
@@ -55,14 +55,15 @@ internal sealed class TrayContext : ApplicationContext
     private ControllerOptions options;
     private Task? loop;
     private readonly bool preview;
+    private readonly bool startupConflictSmoke;
     private bool settingsShown;
     private bool closing;
     private bool configValid = true;
     private string? lastError;
 
-    public TrayContext(bool preview, bool smokeTest, bool showSettings, string? snapshot, bool asyncSmokeTest = false)
+    public TrayContext(bool preview, bool smokeTest, bool showSettings, string? snapshot, bool asyncSmokeTest = false, bool startupConflictSmoke = false)
     {
-        this.preview = preview; uiThreadId = Environment.CurrentManagedThreadId; nativeUiThreadId = GetCurrentThreadId();
+        this.preview = preview; this.startupConflictSmoke = startupConflictSmoke; uiThreadId = Environment.CurrentManagedThreadId; nativeUiThreadId = GetCurrentThreadId();
         directory = preview ? Path.Combine(Path.GetTempPath(), "LegionGoFanControl-preview-" + Guid.NewGuid().ToString("N")) : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LegionGoFanControl");
         uiContext = new WindowsFormsSynchronizationContext();
         SynchronizationContext.SetSynchronizationContext(uiContext);
@@ -130,6 +131,12 @@ internal sealed class TrayContext : ApplicationContext
                             bitmap.Save(snapshot, System.Drawing.Imaging.ImageFormat.Png);
                         }
                         original.VerifyLayout();
+                        if (startupConflictSmoke)
+                        {
+                            if (original.StartupEnabled is not null) throw new InvalidOperationException("Unavailable startup must remain unchanged.");
+                            var changed = options with { OnTemperature = options.OnTemperature + 1 };
+                            if (!await ApplySettingsAsync(changed, original.StartupEnabled) || !File.Exists(ConfigPath) || options.OnTemperature != changed.OnTemperature) throw new InvalidOperationException("Settings save failed when startup is unavailable.");
+                        }
                     }
                 }
                 catch (Exception ex) { Environment.ExitCode = 1; Log("Settings smoke test failed: " + ex); }
@@ -185,7 +192,14 @@ internal sealed class TrayContext : ApplicationContext
         }
         try
         {
-            settingsForm = new SettingsForm(options, !preview && StartupTask.IsEnabled(), !preview) { Icon = appIcon, SaveAsync = ApplySettingsAsync };
+            bool? startupEnabled = null;
+            string? startupError = startupConflictSmoke ? "A different scheduled task already uses the startup task name. It was not changed." : null;
+            if (!preview)
+            {
+                try { startupEnabled = StartupTask.IsEnabled(); }
+                catch (Exception ex) { startupError = ex.Message; Log("Could not read startup settings: " + ex.Message); }
+            }
+            settingsForm = new SettingsForm(options, startupEnabled ?? false, startupEnabled.HasValue, startupError) { Icon = appIcon, SaveAsync = ApplySettingsAsync };
             settingsForm.Shown += (_, _) => settingsShown = true;
             settingsForm.Paint += (_, _) => settingsPaints++;
             settingsForm.FormClosed += (_, _) => settingsForm = null;
@@ -193,7 +207,7 @@ internal sealed class TrayContext : ApplicationContext
         }
         catch (Exception ex) { ShowError("Could not read startup settings: " + ex.Message); }
     }
-    private async Task<bool> ApplySettingsAsync(ControllerOptions next, bool startupEnabled)
+    private async Task<bool> ApplySettingsAsync(ControllerOptions next, bool? startupEnabled)
     {
         StartupTask.Snapshot? previousStartup = null;
         bool taskChanged = false;
@@ -201,9 +215,9 @@ internal sealed class TrayContext : ApplicationContext
         try
         {
             next.Validate();
-            previousStartup = preview ? null : StartupTask.Capture();
+            previousStartup = startupEnabled.HasValue ? StartupTask.Capture() : null;
             // Refresh an enabled task as well, so saving after moving the app updates its path.
-            if (previousStartup is not null && (startupEnabled || previousStartup.Xml is not null)) { taskChanged = true; StartupTask.SetEnabled(startupEnabled); }
+            if (previousStartup is not null && (startupEnabled == true || previousStartup.Xml is not null)) { taskChanged = true; StartupTask.SetEnabled(startupEnabled!.Value); }
             string temporary = ConfigPath + ".tmp";
             File.WriteAllText(temporary, JsonSerializer.Serialize(next, new JsonSerializerOptions { WriteIndented = true }));
             await controller.UpdateOptionsAsync(next); controllerUpdated = true;

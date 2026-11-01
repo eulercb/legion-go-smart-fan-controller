@@ -14,10 +14,17 @@ internal static class StartupTask
     private static void ValidateOwned(dynamic registered)
     {
         dynamic definition = registered.Definition;
-        string marker = definition.RegistrationInfo.Description;
-        string sid = definition.Principal.UserId;
-        if (marker != "LegionGoFanControl managed startup task v1" || !sid.Equals(WindowsIdentity.GetCurrent().User!.Value, StringComparison.OrdinalIgnoreCase) || (int)definition.Principal.LogonType != 3 || (int)definition.Actions.Count != 1 || !Path.GetFileName((string)definition.Actions.Item(1).Path).Equals("LegionGoFanControl.Tray.exe", StringComparison.OrdinalIgnoreCase))
+        string? marker = definition.RegistrationInfo.Description;
+        string? principal = definition.Principal.UserId;
+        int count = (int)definition.Actions.Count;
+        string? actionPath = count == 1 ? (string?)definition.Actions.Item(1).Path : null;
+        if (!StartupTaskOwnership.IsOwned(marker, principal, (int)definition.Principal.LogonType, count, actionPath, WindowsIdentity.GetCurrent().User!.Value, ResolveSid))
             throw new InvalidOperationException("A different scheduled task already uses the startup task name. It was not changed.");
+    }
+    private static string ResolveSid(string identity)
+    {
+        if (identity.StartsWith("S-1-", StringComparison.OrdinalIgnoreCase)) return new SecurityIdentifier(identity).Value;
+        return ((SecurityIdentifier)new NTAccount(identity).Translate(typeof(SecurityIdentifier))).Value;
     }
     private static dynamic? Existing(dynamic folder)
     {
@@ -54,7 +61,7 @@ internal static class StartupTask
         Type type = Type.GetTypeFromProgID("Schedule.Service")!;
         dynamic service = Activator.CreateInstance(type)!; service.Connect();
         dynamic task = service.NewTask(0);
-        task.RegistrationInfo.Description = "LegionGoFanControl managed startup task v1";
+        task.RegistrationInfo.Description = StartupTaskOwnership.Marker;
         task.Principal.UserId = WindowsIdentity.GetCurrent().User!.Value;
         task.Principal.LogonType = 3; // TASK_LOGON_INTERACTIVE_TOKEN
         task.Principal.RunLevel = 1; // TASK_RUNLEVEL_HIGHEST
@@ -69,9 +76,3 @@ internal static class StartupTask
         folder.RegisterTaskDefinition(Name, task, 6, null, null, 3, null); // create or update; interactive token
     }
 }
-
-
-
-
-
-
