@@ -1,17 +1,35 @@
 using LegionGoFanControl.Core;
 using LegionGoFanControl.Tray;
+using LegionGoFanControl.Hardware;
 
 var tests = new (string, Func<Task>)[]
 {
     ("threshold and continuous cooldown", Threshold), ("oscillation resets cooldown", Oscillation),
     ("sensor failures never release", SensorFailure), ("hung sensor stops access", HungSensor), ("failed write and readback", WriteFailures),
     ("external startup and interference", Ownership), ("prewrite ownership race", OwnershipRace), ("shutdown and resume", Lifecycle),
-    ("manual and firmware modes", Modes), ("validation", Validation), ("serialized access", Concurrent), ("bounded logging", Logging), ("missing startup task lookup", MissingStartupTask), ("startup task identity", StartupIdentity)
+    ("manual and firmware modes", Modes), ("validation", Validation), ("serialized access", Concurrent), ("bounded logging", Logging), ("missing startup task lookup", MissingStartupTask), ("startup task identity", StartupIdentity), ("Full Speed operation", HardwareWrite)
 };
 foreach (var (name, test) in tests)
 {
     try { await test(); Console.WriteLine($"PASS {name}"); }
     catch (Exception ex) { Console.Error.WriteLine($"FAIL {name}: {ex}"); Environment.ExitCode = 1; }
+}
+
+static Task HardwareWrite()
+{
+    bool state = false; int deviceChecks = 0, writes = 0;
+    void CheckDevice() => deviceChecks++;
+    bool Read() => state;
+    void Write(bool value) { writes++; state = value; }
+    Check(FullSpeedOperation.Set(true, CancellationToken.None, CheckDevice, Read, Write) == FanWriteResult.Changed && state && writes == 1 && deviceChecks == 1, "enable and verify");
+    Check(FullSpeedOperation.Set(true, CancellationToken.None, CheckDevice, Read, Write) == FanWriteResult.AlreadyInRequestedState && writes == 1 && deviceChecks == 2, "already enabled");
+    try { FullSpeedOperation.Set(false, CancellationToken.None, CheckDevice, Read, _ => { }); throw new Exception("missing mismatch error"); } catch (InvalidOperationException) { }
+    using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
+    try { FullSpeedOperation.Set(false, cancelled.Token, CheckDevice, Read, Write); throw new Exception("missing cancellation"); } catch (OperationCanceledException) { }
+    Check(state && writes == 1, "cancel prevents write");
+    try { FullSpeedOperation.Set(false, CancellationToken.None, () => throw new InvalidOperationException("unsupported"), Read, Write); throw new Exception("missing device error"); } catch (InvalidOperationException) { }
+    Check(state && writes == 1, "device gate prevents write");
+    return Task.CompletedTask;
 }
 
 static Task StartupIdentity()

@@ -7,6 +7,7 @@ if (args.Length == 0 || (args.Length == 1 && args[0] == "diagnostics"))
     try { Console.WriteLine(JsonSerializer.Serialize(await LenovoDiagnostics.CollectAsync(), new JsonSerializerOptions { WriteIndented = true })); return 0; }
     catch (Exception ex) { Console.Error.WriteLine($"Diagnostics failed: {ex.Message}"); return 1; }
 }
+if (args.Length == 2 && args[0] == "test-full-speed-modes" && args[1] == "--confirm-hardware-write") return await CrossModeExperiment.RunAsync();
 if (args.Length == 2 && args[0] == "test-full-speed" && args[1] == "--confirm-hardware-write")
 {
     var hardware = new LenovoFanHardware();
@@ -33,6 +34,5 @@ if (args.Length == 2 && args[0] == "test-full-speed" && args[1] == "--confirm-ha
         return 1;
     }
 }
-Console.Error.WriteLine("Usage: diagnostics | test-full-speed --confirm-hardware-write");
+Console.Error.WriteLine("Usage: diagnostics | test-full-speed --confirm-hardware-write | test-full-speed-modes --confirm-hardware-write");
 return 2;
-

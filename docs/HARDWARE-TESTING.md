@@ -1,6 +1,6 @@
 # Hardware testing checklist
 
-Read-only hardware access and one approved manual Full Speed write/readback/restore test were verified on model 83E1 / Legion Go 8APU1, BIOS N3CN40WW. The write test passed in Custom mode 255 with an administrator token. Automatic temperature-driven operation, live thermal stress, sleep/resume, and other firmware versions remain untested. Use an original Legion Go and keep Legion Space available for observation.
+Read-only hardware access and a controlled cross-mode Full Speed test were verified on model 83E1 / Legion Go 8APU1, BIOS N3CN40WW. The test showed a higher median raw fan reading while Full Speed was enabled in modes 1, 2, 3, and 255. Values are uncalibrated and are not RPM. The test does not validate other firmware versions, hot loads, or automatic thermal control.
 
 ## 1. Read-only discovery
 
@@ -18,14 +18,21 @@ Confirm `compatibleDevice`, BIOS, class signatures, plausible Celsius readings, 
 
 ## 2. Isolated Full Speed write test
 
-This test changes hardware briefly. Run it only after the device operator explicitly approves the test and is present to observe it. On the tested device the current smart-fan mode was 3, but the write path requires mode 255 (Custom). Select Custom in Legion Space first and rerun diagnostics to confirm the mode is 255. From an elevated PowerShell at the repository root:
+Hardware writes require explicit operator authorization and an operator present to observe the device. Run commands from an elevated PowerShell at the repository root. The simple flag test is:
 
 ```powershell
 dotnet run --project src/LegionGoFanControl.Diagnostics -- test-full-speed --confirm-hardware-write
 ```
 
-The test reads the initial state. If Full Speed is already on, it preserves it and performs no write. Otherwise it requests on, requires readback to confirm, then requests off and verifies restoration. A success prints `Enabled and verified` and `Restored and verified`. The approved run on the reference device began with Full Speed off, printed both success lines, and exited 0; the subsequent read-only check confirmed Full Speed off. Before/after values are recorded in [diagnostics/full-speed-test-83e1-n3cn40ww.json](diagnostics/full-speed-test-83e1-n3cn40ww.json). This result does not establish automatic control or long-term operation. If a future run errors or readback mismatches, the outcome can be uncertain; inspect Legion Space and manually restore firmware behavior as appropriate. Do not repeatedly retry an uncertain write without checking state.
+The test preserves an already-on Full Speed flag without writing. Otherwise it enables the flag, verifies readback, disables it, and verifies restoration.
 
+The explicit mode experiment writes Lenovo thermal modes and requires stopping the tray first. It was run only on original model 83E1 / 8APU1 BIOS N3CN40WW:
+
+```powershell
+dotnet run --project src/LegionGoFanControl.Diagnostics -- test-full-speed-modes --confirm-hardware-write
+```
+
+This test preserves the initial Full Speed state, tests modes Quiet (1), Balanced (2), Performance (3), and Custom (255), and restores the initial mode. If it times out, temperature becomes unsafe or unknown, mode becomes unknown, or state cannot be verified, abort without further writes. Hardware may retain the last test mode or Full Speed setting and need manual inspection. Do not generalize this mode experiment to other firmware.
 ## 3. Tray preview without hardware writes
 
 ```powershell
@@ -35,12 +42,19 @@ dotnet run --project src/LegionGoFanControl.Tray -- --smoke-test
 
 Both flags select an in-memory fake hardware backend; they do not invoke Lenovo WMI methods or write fan state. Preview remains open until exited. Smoke test starts the tray and exits after about 1.5 seconds. The app can create local settings/log files under `%LOCALAPPDATA%\LegionGoFanControl`.
 
-## 4. Automatic operation
+## 4. Tray operation
 
-Only after diagnostics and the isolated test have been reviewed, an operator may launch the app elevated. The UI starts in Automatic mode and can write the Full Speed flag when temperature meets the configured threshold. Default on/off thresholds are 80°C/70°C, polling every 2 seconds, with a 30-second release cool-down. Use Legion Space Custom mode (mode 255); an earlier read-only sample reported mode 3, which does not pass the current write gate. Monitor temperature and reported state; automatic thermal operation has not yet been validated under load.
+Left-click the tray icon to toggle automatic control. Teal/green indicates enabled; gray indicates disabled. Right-click opens the single configuration menu: enable toggle, On/Off temperature sliders, polling and cool-down sliders with values/units, startup checkbox, Open Logs, and Exit. Slider values apply on committed/debounced update after validation, not on every drag frame. The `--settings` compatibility option opens this same right-click menu in normal and preview runs.
 
+Settings are persisted as flat JSON. Missing `enabled` defaults to true, while prior threshold and timing values remain intact. The startup checkbox changes the startup task only when explicitly toggled; editing thermal settings alone does not write startup configuration. Logs remain bounded.
+
+Disabling stops recurring WMI polling after attempting to release only a Full Speed override owned by this app and allowed by its safety checks. An external override, or one retained due to hot temperature or unsafe/unknown telemetry, may remain enabled. Disabled state does not promise the fan is off. Automatic control ignores thermal mode. The tested hardware results above remain limited to BIOS N3CN40WW; automatic operation under live thermal stress remains unvalidated.
 ## Access, ownership, and recovery
 
-For the tested Legion Go, administrator elevation is required to read Lenovo `root\WMI` classes and telemetry; model/BIOS CIM queries succeeded without elevation. The admin requirement is confirmed only for this device/environment. One manual Full Speed write/readback/restore test passed; automatic thermal operation and sustained behavior remain untested.
+For the tested Legion Go, administrator elevation is required to read Lenovo `root\WMI` classes and telemetry; model/BIOS CIM queries succeeded without elevation. The admin requirement is confirmed only for this device/environment. The controlled cross-mode test passed on N3CN40WW. Automatic thermal operation and sustained behavior remain untested.
 
 The controller avoids taking ownership when Full Speed is already on. On normal exit in Automatic mode, stale/error telemetry causes it to leave an owned Full Speed override enabled for safety. A cool CPU with fresh telemetry and a clearly owned override is released on suspend. If the last reading is hot or unknown, the controller retains Full Speed during sleep but relinquishes ownership; after resume an already-on flag is treated as external and is not released automatically. Inspect Legion Space and release it manually if needed. A hung sensor stops all further hardware operations in that process, including shutdown and mode changes; restart the app to retry. Failed writes, mismatched readback, detected outside changes, forced termination, provider hangs, firmware overrides, and external-controller races can leave the actual state uncertain. Firmware thermal protections remain in place, but the app does not independently validate their behavior.
+
+## Cross-mode evidence (N3CN40WW)
+
+The test began and ended in Custom (255) with Full Speed off. It tested modes 1/Quiet, 2/Balanced, 3/Performance, and 255/Custom, with three baseline and seven enabled/disabled raw fan samples per mode. Median baseline → enabled → disabled values: Quiet 4045 → 8729 → 8261; Balanced 7673 → 8984 → 8422; Performance 7812 → 9059 → 8455; Custom 7840 → 9098 → 8489. The fan-table fingerprint was identical before and after; startup task/XML remained enabled and unchanged; the tray was restarted. Values are raw, uncalibrated readings, not RPM. Disabled readings show coast-down/carryover and had not fully settled after seven seconds. This cool/low-load result does not establish exact fan speed or behavior on other firmware/hot loads. The production app does not change modes or power limits.

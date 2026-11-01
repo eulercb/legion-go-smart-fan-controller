@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "device": {
+    "model": "83E1",
+    "family": "Legion Go 8APU1",
+    "bios": "N3CN40WW"
+  },
+  "test": {
+    "exitCode": 0,
+    "initialMode": 255,
+    "finalMode": 255,
+    "initialFullSpeed": false,
+    "finalFullSpeed": false,
+    "restored": true,
+    "testedModes": [
+      { "id": 1, "name": "Quiet", "baselineRawMedian": 4045, "enabledRawMedian": 8729, "disabledRawMedian": 8261, "baselineSampleCount": 3, "enabledSampleCount": 7, "disabledSampleCount": 7 },
+      { "id": 2, "name": "Balanced", "baselineRawMedian": 7673, "enabledRawMedian": 8984, "disabledRawMedian": 8422, "baselineSampleCount": 3, "enabledSampleCount": 7, "disabledSampleCount": 7 },
+      { "id": 3, "name": "Performance", "baselineRawMedian": 7812, "enabledRawMedian": 9059, "disabledRawMedian": 8455, "baselineSampleCount": 3, "enabledSampleCount": 7, "disabledSampleCount": 7 },
+      { "id": 255, "name": "Custom", "baselineRawMedian": 7840, "enabledRawMedian": 9098, "disabledRawMedian": 8489, "baselineSampleCount": 3, "enabledSampleCount": 7, "disabledSampleCount": 7 }
+    ],
+    "fanTableFingerprintUnchanged": true,
+    "startupTaskAndXmlUnchanged": true,
+    "trayRestartedAfterTest": true
+  },
+  "interpretation": {
+    "fanValues": "Raw, uncalibrated feature readings; not RPM.",
+    "limitations": [
+      "One original 83E1/8APU1 device and BIOS N3CN40WW only.",
+      "Cool/low-load observation; hot-load behavior was not evaluated.",
+      "Disabled samples coasted down and had not fully settled within seven seconds.",
+      "Does not establish exact fan speed, broad firmware compatibility, or automatic thermal control."
+    ],
+    "productionBehavior": "Automatic control ignores thermal mode and does not change modes, power limits, or fan tables."
+  }
+}

@@ -33,14 +33,8 @@ public sealed class LenovoFanHardware : IFanHardware
     public Task<bool> ReadFullSpeedAsync(CancellationToken cancellationToken) => ExecuteAsync(_ => WmiProtocol.FullSpeed(), cancellationToken);
     public Task<FanWriteResult> SetFullSpeedAsync(bool enabled, CancellationToken cancellationToken) => ExecuteAsync(operationToken =>
     {
-        WmiProtocol.RequireSupportedDevice();
-        var mode = WmiProtocol.Unsigned(WmiProtocol.Call("LENOVO_GAMEZONE_DATA", "GetSmartFanMode", null, "Data"));
-        if (mode != 255) throw new InvalidOperationException($"Full Speed writes require Custom smart-fan mode (255); current mode is {mode}. Mode independence has not been established.");
-        if (WmiProtocol.FullSpeed() == enabled) return FanWriteResult.AlreadyInRequestedState;
-        operationToken.ThrowIfCancellationRequested();
-        WmiProtocol.Call("LENOVO_OTHER_METHOD", "SetFeatureValue", new Dictionary<string, uint> { ["IDs"] = 0x04020000, ["value"] = enabled ? 1u : 0u }, null);
-        if (WmiProtocol.FullSpeed() != enabled) throw new InvalidOperationException("Full Speed readback did not match the requested state; write outcome is uncertain.");
-        return FanWriteResult.Changed;
+        return FullSpeedOperation.Set(enabled, operationToken, WmiProtocol.RequireSupportedDevice, WmiProtocol.FullSpeed,
+            value => WmiProtocol.Call("LENOVO_OTHER_METHOD", "SetFeatureValue", new Dictionary<string, uint> { ["IDs"] = 0x04020000, ["value"] = value ? 1u : 0u }, null));
     }, cancellationToken);
 }
 
@@ -89,7 +83,3 @@ internal static class WmiProtocol
         finally { foreach (var row in rows) row.Dispose(); }
     }
 }
-
-
-
-

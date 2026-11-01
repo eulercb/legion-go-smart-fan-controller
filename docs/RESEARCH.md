@@ -1,6 +1,6 @@
 # Hardware and protocol research
 
-Research date: 2026-11-01. Evidence is separated below into source review, device read-only observations, and an approved hardware write test. The target is model **83E1**, family **Legion Go 8APU1**, BIOS **N3CN40WW**. Read-only CIM identified the device; an administrator-token run read Lenovo WMI metadata and telemetry. A separate operator-approved Full Speed enable/readback/restore test passed in Custom mode. Automatic thermal control and live thermal stress remain untested.
+Research date: 2026-11-01. Evidence is separated below into source review, device read-only observations, and an approved hardware write test. The target is model **83E1**, family **Legion Go 8APU1**, BIOS **N3CN40WW**. Read-only CIM identified the device; an administrator-token run read Lenovo WMI metadata and telemetry. An operator-approved controlled cross-mode test recorded higher raw fan medians while Full Speed was enabled in Quiet, Balanced, Performance, and Custom. Automatic thermal control and live thermal stress remain untested.
 
 ## Device read-only observation
 
@@ -10,15 +10,15 @@ The non-elevated run read model and BIOS successfully but every `root\\WMI` quer
 
 ## Approved write test
 
-With Legion Space in Custom mode 255 and an administrator token, the isolated CLI test was run once. Initial Full Speed was off; the app enabled it and verified readback, then disabled it and verified restoration. It exited with code 0. Read-only snapshots immediately around the run showed Full Speed off both before and after. The full sanitized record is [diagnostics/full-speed-test-83e1-n3cn40ww.json](diagnostics/full-speed-test-83e1-n3cn40ww.json). This verifies that specific manual operation on this device and BIOS; it does not verify automatic thermal control, long-term behavior, or other BIOS versions.
+The controlled test used BIOS N3CN40WW, began in Custom (255) with Full Speed off, and exercised modes 1, 2, 3, and 255 with three baseline samples and seven enabled/disabled samples per mode. Median raw readings baseline → on → off were 4045→8729→8261, 7673→8984→8422, 7812→9059→8455, and 7840→9098→8489. Flag readback tracked writes; table fingerprint and startup task/XML were unchanged; final mode and Full Speed restored to 255/off. Values are uncalibrated, not RPM; off samples show carryover after seven seconds. This cool/low-load test does not validate hot loads or other firmware. See [diagnostics/cross-mode-N3CN40WW.json](diagnostics/cross-mode-N3CN40WW.json).
 
 ## Findings
 
 - The Full Speed override is separate from the fan table. Source implementations map it to `LENOVO_OTHER_METHOD.GetFeatureValue` / `SetFeatureValue`, feature ID `0x04020000`, and values 0/1. The setter is a void/out method; invocation alone does not establish success. This project reads the value back and requires a match.
-- The hardware reports smart-fan mode through `LENOVO_GAMEZONE_DATA.GetSmartFanMode`. Writes are gated to mode **255 (Custom)** because the source-reviewed Cooling Tray uses this mode and independence in other Legion Space modes is not established. The application does not edit or raise the fan curve.
+- The hardware reports smart-fan mode through `LENOVO_GAMEZONE_DATA.GetSmartFanMode`. The production app ignores thermal mode and does not change modes or power limits. The manual mode experiment is a separate, explicit diagnostic operation. The application does not edit or raise the fan curve.
 - Temperature sources found in upstream implementations are `LENOVO_GAMEZONE_DATA.GetCPUTemp` (`Data`) and `LENOVO_OTHER_METHOD.GetFeatureValue(0x05040000)` (`Value`). This implementation tries the first and falls back to the second; values are treated as Celsius and constrained to 1–110°C. The diagnostic command reports both independently.
 - Feature `0x04030001` is exposed as a **raw, uncalibrated fan reading**, not reliable RPM. Although some projects label it RPM, another primary implementation cautions against presenting it as calibrated speed.
-- Firmware mode, Legion Space, or other utilities may override or conflict with this feature. Whether Full Speed works outside Custom mode is not established. The controller detects some state changes and pauses rather than repeatedly fighting them.
+- Firmware mode, Legion Space, or other utilities may override or conflict with this feature. On BIOS N3CN40WW the test showed higher raw fan readings in all four tested modes under cool/low-load conditions. Other firmware and hot-load behavior remain unknown. The controller detects some state changes and pauses rather than repeatedly fighting them.
 
 ## Source review and licensing
 
@@ -28,4 +28,4 @@ This repository independently implements the protocol from these documented iden
 
 ## Remaining validation
 
-Manual Full Speed activation, readback, and restoration passed once in the approved test above. The earlier read-only sample reported smart-fan mode 3, whereas the code's write gate requires 255 (Custom); the later test was performed after selecting Custom. Automatic thermal control remains untested. Do not infer long-term behavior from one successful operation. Sensor freshness under load, coexistence with other utilities, suspend/resume behavior, and behavior across BIOS/Legion Space versions remain open.
+Manual Full Speed activation, readback, and restoration passed once in the approved test above. Cross-mode evidence applies only to N3CN40WW and cool/low-load observations; automatic thermal control and other BIOS versions remain unvalidated. Automatic thermal control remains untested. Do not infer long-term behavior from one successful operation. Sensor freshness under load, coexistence with other utilities, suspend/resume behavior, and behavior across BIOS/Legion Space versions remain open.

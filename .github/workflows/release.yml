@@ -22,6 +22,8 @@ jobs:
         run: dotnet build LegionGoFanControl.slnx -c Release
       - name: Run simulated tests
         run: dotnet run --project tests/LegionGoFanControl.Tests -c Release --no-build
+      - name: Run isolated experiment safety tests
+        run: dotnet run --project tests/LegionGoFanControl.Experiment.Tests -c Release
       - name: Smoke test the simulated tray
         shell: pwsh
         run: |
@@ -31,6 +33,12 @@ jobs:
           $process = Start-Process -FilePath "src/LegionGoFanControl.Tray/bin/Release/net10.0-windows/LegionGoFanControl.Tray.exe" -ArgumentList '--startup-conflict-smoke', '--settings' -PassThru
           if (-not $process.WaitForExit(30000)) { $process.Kill(); throw 'Startup conflict smoke test timed out.' }
           if ($process.ExitCode -ne 0) { throw "Startup conflict smoke test failed: $($process.ExitCode)" }
+          $process = Start-Process -FilePath "src/LegionGoFanControl.Tray/bin/Release/net10.0-windows/LegionGoFanControl.Tray.exe" -ArgumentList '--ux-smoke-test' -PassThru
+          if (-not $process.WaitForExit(30000)) { $process.Kill(); throw 'UX smoke test timed out.' }
+          if ($process.ExitCode -ne 0) { throw "UX smoke test failed: $($process.ExitCode)" }
+          $process = Start-Process -FilePath "src/LegionGoFanControl.Tray/bin/Release/net10.0-windows/LegionGoFanControl.Tray.exe" -ArgumentList '--ux-disabled-smoke' -PassThru
+          if (-not $process.WaitForExit(30000)) { $process.Kill(); throw 'Disabled UX smoke test timed out.' }
+          if ($process.ExitCode -ne 0) { throw "Disabled UX smoke test failed: $($process.ExitCode)" }
       - name: Package portable apps
         shell: pwsh
         run: |
