@@ -12,22 +12,32 @@ public sealed class FanController
     private long? cooldownTick, previousTick;
     private DateTimeOffset? cooldownStarted;
     private DateTimeOffset? lastSampleTimestamp;
+    private DateTimeOffset? lastSsdTimestamp;
+    private double? ssdTemperature;
+    private string? ssdError;
     private bool telemetryValid;
     private bool? actual;
 
-    public FanController(IFanHardware hardware, ControllerOptions? options = null, TimeProvider? timeProvider = null)
+    public FanController(IFanHardware hardware, ControllerOptions? options = null, TimeProvider? timeProvider = null, ControllerMode initialMode = ControllerMode.Automatic)
     {
         this.hardware = hardware ?? throw new ArgumentNullException(nameof(hardware));
         this.options = options ?? new ControllerOptions();
         this.options.Validate();
         time = timeProvider ?? TimeProvider.System;
+        if (!Enum.IsDefined(initialMode)) throw new ArgumentOutOfRangeException(nameof(initialMode));
+        Mode(initialMode);
     }
     public ControllerSnapshot Snapshot => Volatile.Read(ref snapshot);
     public ControllerOptions Options => options;
 
     private void Publish(ControllerState state, double? temperature = null, string? error = null) =>
-        Volatile.Write(ref snapshot, new(snapshot.Mode, state, temperature, actual, owned, error, cooldownStarted));
+        Volatile.Write(ref snapshot, new(snapshot.Mode, state, temperature, actual, owned, error, cooldownStarted, ssdTemperature, ssdError));
     private void ClearCooldown() { cooldownTick = null; cooldownStarted = null; }
+    private bool SafeToRelease() => telemetryValid && lastSampleTimestamp.HasValue &&
+        time.GetUtcNow() - lastSampleTimestamp.Value <= options.MaximumSampleAge &&
+        snapshot.Temperature is double temperature && temperature <= options.OffTemperature &&
+        lastSsdTimestamp.HasValue && time.GetUtcNow() - lastSsdTimestamp.Value <= options.MaximumSampleAge &&
+        ssdTemperature.HasValue && ssdTemperature.Value <= options.SsdOffTemperature && ssdError is null;
     private void Mode(ControllerMode mode) => Volatile.Write(ref snapshot, snapshot with { Mode = mode });
 
     public async Task TickAsync(CancellationToken cancellationToken = default)
@@ -54,7 +64,7 @@ public sealed class FanController
             if (blocked) { Publish(ControllerState.Interference, error: "Control paused after an ambiguous or external fan state change; select a mode to retry."); return; }
             if (snapshot.Mode == ControllerMode.Firmware)
             {
-                if (owned && !await WriteAsync(false, ct).ConfigureAwait(false)) return;
+                if (owned && SafeToRelease() && !await WriteAsync(false, ct).ConfigureAwait(false)) return;
                 Publish(actual == true && !owned ? ControllerState.ExternalFullSpeed : ControllerState.Firmware);
                 return;
             }
@@ -64,22 +74,28 @@ public sealed class FanController
                 Publish(owned ? ControllerState.FullSpeed : ControllerState.ExternalFullSpeed);
                 return;
             }
+            // Automatic control manages an observed enabled override, including one already on at startup.
+            if (observed) owned = true;
             TemperatureSample sample;
             try { sample = await hardware.ReadTemperatureAsync(ct).WaitAsync(options.MaximumSampleAge, ct).ConfigureAwait(false); }
             catch (TimeoutException) { sensorHung = true; blocked = true; throw new TimeoutException("Temperature read timed out; hardware access is stopped until restart."); }
             DateTimeOffset now = time.GetUtcNow();
-            if (!double.IsFinite(sample.Celsius) || sample.Celsius < 0 || sample.Celsius > 120 || sample.Timestamp > now + TimeSpan.FromSeconds(2) || now - sample.Timestamp > options.MaximumSampleAge || (lastSampleTimestamp.HasValue && sample.Timestamp < lastSampleTimestamp))
-                throw new InvalidOperationException("Temperature reading is invalid, stale, or has a future timestamp.");
-            lastSampleTimestamp = sample.Timestamp; telemetryValid = true;
+            bool cpuValid = sample.CpuError is null && double.IsFinite(sample.Celsius) && sample.Celsius >= 0 && sample.Celsius <= 120 && sample.Timestamp <= now + TimeSpan.FromSeconds(2) && now - sample.Timestamp <= options.MaximumSampleAge && (!lastSampleTimestamp.HasValue || sample.Timestamp >= lastSampleTimestamp);
+            bool ssdValid = sample.SsdError is null && sample.SsdCelsius is double s && double.IsFinite(s) && s >= 0 && s <= 120 && sample.SsdTimestamp is DateTimeOffset st && st <= now + TimeSpan.FromSeconds(2) && now - st <= options.MaximumSampleAge && (!lastSsdTimestamp.HasValue || st >= lastSsdTimestamp);
+            if (cpuValid) lastSampleTimestamp = sample.Timestamp;
+            if (ssdValid) lastSsdTimestamp = sample.SsdTimestamp;
+            ssdTemperature = ssdValid ? sample.SsdCelsius : null;
+            ssdError = ssdValid ? null : sample.SsdError ?? "SSD temperature reading is missing, invalid, or stale.";
+            telemetryValid = cpuValid && ssdValid;
             long tick = time.GetTimestamp();
             if (previousTick.HasValue && time.GetElapsedTime(previousTick.Value, tick) > options.MaximumSampleAge) ClearCooldown();
             previousTick = tick;
-            if (sample.Celsius >= options.OnTemperature)
+            if ((cpuValid && sample.Celsius >= options.OnTemperature) || (ssdValid && sample.SsdCelsius >= options.SsdOnTemperature))
             {
                 ClearCooldown();
                 if (!observed && !await WriteAsync(true, ct).ConfigureAwait(false)) return;
             }
-            else if (owned && sample.Celsius <= options.OffTemperature)
+            else if (owned && cpuValid && ssdValid && sample.Celsius <= options.OffTemperature && sample.SsdCelsius <= options.SsdOffTemperature)
             {
                 if (!cooldownTick.HasValue) { cooldownTick = tick; cooldownStarted = now; }
                 if (time.GetElapsedTime(cooldownTick.Value, tick) >= options.ReleaseCooldown)
@@ -89,7 +105,8 @@ public sealed class FanController
                 }
             }
             else ClearCooldown();
-            Publish(cooldownTick.HasValue ? ControllerState.CoolingDown : owned ? ControllerState.FullSpeed : actual == true ? ControllerState.ExternalFullSpeed : ControllerState.Monitoring, sample.Celsius);
+            string? sensorError = !cpuValid ? sample.CpuError ?? "CPU temperature reading is invalid or stale." : ssdError;
+            Publish(sensorError is not null ? ControllerState.Error : cooldownTick.HasValue ? ControllerState.CoolingDown : owned ? ControllerState.FullSpeed : ControllerState.Monitoring, cpuValid ? sample.Celsius : null, sensorError);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { ClearCooldown(); throw; }
         catch (Exception ex)
@@ -106,7 +123,7 @@ public sealed class FanController
             FanWriteResult result = await hardware.SetFullSpeedAsync(enabled, ct).ConfigureAwait(false);
             actual = await hardware.ReadFullSpeedAsync(ct).ConfigureAwait(false);
             if (actual != enabled) throw new InvalidOperationException("Full Speed readback disagrees with the requested state.");
-            owned = enabled && result == FanWriteResult.Changed;
+            owned = enabled && (result == FanWriteResult.Changed || snapshot.Mode == ControllerMode.Automatic);
             return true;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { owned = false; blocked = true; actual = null; throw; }
@@ -143,9 +160,7 @@ public sealed class FanController
         try
         {
             // Release before sleep only with a fresh reading showing a cool CPU.
-            if (owned && !blocked && !sensorHung && telemetryValid && lastSampleTimestamp.HasValue &&
-                time.GetUtcNow() - lastSampleTimestamp.Value <= options.MaximumSampleAge &&
-                snapshot.Temperature is double temperature && temperature <= options.OffTemperature)
+            if (owned && !blocked && !sensorHung && SafeToRelease())
             {
                 try
                 {
@@ -173,10 +188,10 @@ public sealed class FanController
         {
             if (stopped) return;
             ClearCooldown();
-            if (owned && snapshot.Mode == ControllerMode.Automatic && (!telemetryValid || !lastSampleTimestamp.HasValue || time.GetUtcNow() - lastSampleTimestamp.Value > options.MaximumSampleAge))
+            if (owned && !SafeToRelease())
             {
                 stopped = true; owned = false;
-                Publish(ControllerState.Error, error: "Full Speed left enabled because temperature telemetry is unavailable or stale.");
+                Publish(ControllerState.Error, error: "Full Speed left enabled because temperature is hot or telemetry is unavailable or stale.");
                 return;
             }
             if (owned && !blocked && !suspended)

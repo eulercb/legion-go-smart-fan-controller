@@ -60,7 +60,7 @@ internal sealed class TrayContext : ApplicationContext
     private bool settingsShown;
     private bool closing;
     private bool configValid = true;
-    private string? lastError;
+    private string? lastError, lastSsdError;
 
     public TrayContext(bool preview, bool smokeTest, bool showSettings, string? snapshot, bool asyncSmokeTest = false, bool startupConflictSmoke = false, bool uxSmokeTest = false, bool uxDisabledSmoke = false)
     {
@@ -81,7 +81,7 @@ internal sealed class TrayContext : ApplicationContext
         }
         catch (Exception ex) { options = new(); configError = ex.Message; }
         uxHardware = uxSmokeTest ? new UxPreviewHardware() : null;
-        controller = new FanController(uxHardware is not null ? uxHardware : asyncSmokeTest ? new AsyncPreviewHardware() : preview ? new PreviewHardware() : new LenovoFanHardware(), options);
+        controller = new FanController(uxHardware is not null ? uxHardware : asyncSmokeTest ? new AsyncPreviewHardware() : preview ? new PreviewHardware() : new LenovoFanHardware(), options, initialMode: enabled && configError is null ? ControllerMode.Automatic : ControllerMode.Firmware);
         menu = new SettingsMenu(options, preview, startupConflictSmoke, ApplySettingsAsync, ChangeStartupAsync);
         menu.Items.Insert(0, status); menu.Items.Insert(1, toggle); menu.Items.Insert(2, new ToolStripSeparator());
         menu.Items.Add(new ToolStripSeparator());
@@ -143,10 +143,11 @@ internal sealed class TrayContext : ApplicationContext
     {
         var hw = uxHardware ?? throw new InvalidOperationException("Missing fake hardware.");
         await Task.Delay(500);
-        if (!enabled || !hw.FullSpeed || !controller.Snapshot.OwnsFullSpeed || options.ReleaseCooldown != TimeSpan.FromSeconds(10)) throw new InvalidOperationException("Legacy config or owned automatic state failed.");
+        if (!enabled || !hw.FullSpeed || !controller.Snapshot.OwnsFullSpeed || options.ReleaseCooldown != TimeSpan.FromSeconds(10) || options.SsdOnTemperature != 70 || options.SsdOffTemperature != 60) throw new InvalidOperationException("Legacy config or owned automatic state failed.");
         string original = File.ReadAllText(ConfigPath); int writes = hw.OffWrites;
         failSaveForSmoke = true; suppressErrorsForSmoke = true; await ChangeEnabledAsync(false); failSaveForSmoke = false; suppressErrorsForSmoke = false;
         if (!enabled || !hw.FullSpeed || hw.OffWrites != writes || File.ReadAllText(ConfigPath) != original) throw new InvalidOperationException("Failed persistence changed owned state.");
+        hw.Temperature = 65; await controller.TickAsync();
         await ChangeEnabledAsync(false);
         if (enabled || hw.FullSpeed || hw.OffWrites != 1) throw new InvalidOperationException("Disable did not release owned override.");
         VerifySaved(false, 80, 70, 10);
@@ -154,10 +155,10 @@ internal sealed class TrayContext : ApplicationContext
         if (hw.Reads != reads) throw new InvalidOperationException("Disabled polling continued.");
         hw.FullSpeed = true; hw.Temperature = 65; int samples = hw.Samples;
         await ChangeEnabledAsync(true);
-        if (!enabled || hw.Samples <= samples || !hw.FullSpeed || controller.Snapshot.State != ControllerState.ExternalFullSpeed) throw new InvalidOperationException("Re-enable did not take fresh sample or preserve external override.");
+        if (!enabled || hw.Samples <= samples || !hw.FullSpeed || controller.Snapshot.State != ControllerState.CoolingDown || !controller.Snapshot.OwnsFullSpeed) throw new InvalidOperationException("Re-enable did not adopt the active override and start cooldown.");
         VerifySaved(true, 80, 70, 10);
         await ChangeEnabledAsync(false);
-        if (!hw.FullSpeed || hw.OffWrites != 1 || controller.Snapshot.State != ControllerState.ExternalFullSpeed) throw new InvalidOperationException("External override was changed.");
+        if (hw.FullSpeed || hw.OffWrites != 2) throw new InvalidOperationException("Disable did not release the adopted override.");
         int before = saves; var row = menu.Row(0); row.PreviewValue(162); row.PreviewValue(164);
         if (saves != before) throw new InvalidOperationException("Slider wrote during drag.");
         if (!await row.CommitForSmokeAsync() || saves != before + 1) throw new InvalidOperationException("Slider commit was not saved once.");
@@ -165,6 +166,12 @@ internal sealed class TrayContext : ApplicationContext
         before = saves; menu.SuppressValidationMessage = true; var off = menu.Row(1); off.PreviewValue(164);
         if (await off.CommitForSmokeAsync() || saves != before || options.OffTemperature != 70) throw new InvalidOperationException("Invalid threshold mutated settings.");
         VerifySaved(false, 82, 70, 10);
+        before = saves; var ssdOn = menu.Row(2); ssdOn.PreviewValue(144);
+        if (!await ssdOn.CommitForSmokeAsync() || saves != before + 1) throw new InvalidOperationException("SSD on slider was not saved.");
+        var ssdOff = menu.Row(3); ssdOff.PreviewValue(122);
+        if (!await ssdOff.CommitForSmokeAsync()) throw new InvalidOperationException("SSD off slider was not saved.");
+        var saved = JsonSerializer.Deserialize<ControllerOptions>(File.ReadAllText(ConfigPath))!;
+        if (saved.SsdOnTemperature != 72 || saved.SsdOffTemperature != 61) throw new InvalidOperationException("SSD thresholds did not persist.");
         Task pending = ChangeEnabledAsync(true);
         await ExitAsync();
         if (!pending.IsCompletedSuccessfully || !closing) throw new InvalidOperationException("Exit did not await the pending transition.");
@@ -173,7 +180,7 @@ internal sealed class TrayContext : ApplicationContext
     {
         var hw = uxHardware ?? throw new InvalidOperationException("Missing fake hardware.");
         await Task.Delay(2300);
-        if (enabled || hw.FullSpeed || hw.Samples != 0 || hw.OffWrites != 0 || controller.Snapshot.Mode != ControllerMode.Firmware) throw new InvalidOperationException("Disabled restart activated control.");
+        if (enabled || hw.FullSpeed || hw.Reads != 0 || hw.Samples != 0 || hw.OffWrites != 0 || controller.Snapshot.Mode != ControllerMode.Firmware) throw new InvalidOperationException("Disabled restart activated control.");
         VerifySaved(false, 80, 70, 10);
     }
     private void VerifySaved(bool expectedEnabled, double on, double off, int cooldown)
@@ -185,7 +192,6 @@ internal sealed class TrayContext : ApplicationContext
     }
     private async Task StartPausedAsync()
     {
-        await controller.SetModeAsync(ControllerMode.Firmware);
         UpdateStatus();
         await PollAsync(cancellation.Token);
     }
@@ -242,12 +248,17 @@ internal sealed class TrayContext : ApplicationContext
         if (Environment.CurrentManagedThreadId != uiThreadId) throw new InvalidOperationException("Status update occurred off the UI thread.");
         statusUpdates++;
         var s = controller.Snapshot;
-        string temperature = s.Temperature is double t ? $"{t:0.0} °C" : "temperature unavailable";
-        status.Text = $"{temperature} | {s.State} | Full Speed: {(s.FullSpeed is null ? "unknown" : s.FullSpeed.Value ? "on" : "off")}";
-        icon.Text = status.Text.Length > 63 ? status.Text[..63] : status.Text;
+        string temperature = s.Temperature is double t ? $"{t:0.0} °C" : "unavailable";
+        string ssd = s.SsdTemperature is double st ? $"{st:0.0} °C" : "unavailable";
+        status.Text = $"CPU: {temperature} | SSD: {ssd} | {s.State} | Full Speed: {(s.FullSpeed is null ? "unknown" : s.FullSpeed.Value ? "on" : "off")}";
+        if (s.SsdError is not null) status.Text += " | SSD error: " + s.SsdError;
+        if (s.Error is not null) status.Text += " | Error: " + s.Error;
         toggle.Text = enabled ? "Disable fan control" : "Enable fan control";
         icon.Icon = enabled ? enabledIcon : disabledIcon;
-        icon.Text = (enabled ? "Enabled: " : "Disabled: ") + (status.Text.Length > 50 ? status.Text[..50] : status.Text);
+        string tooltip = (enabled ? "Enabled: " : "Disabled: ") + status.Text;
+        icon.Text = tooltip.Length > 127 ? tooltip[..127] : tooltip;
+        if (s.SsdError is not null && s.SsdError != lastSsdError) { lastSsdError = s.SsdError; Log("SSD: " + s.SsdError); }
+        else if (s.SsdError is null) lastSsdError = null;
         if (s.Error is not null && s.Error != lastError) { lastError = s.Error; Log(s.Error); icon.ShowBalloonTip(5000, "Fan controller error", s.Error, ToolTipIcon.Error); }
         else if (s.Error is null) lastError = null;
     }
@@ -309,7 +320,7 @@ internal sealed class TrayContext : ApplicationContext
 internal sealed class PreviewHardware : IFanHardware
 {
     private bool fullSpeed;
-    public Task<TemperatureSample> ReadTemperatureAsync(CancellationToken ct) => Task.FromResult(new TemperatureSample(65, DateTimeOffset.UtcNow));
+    public Task<TemperatureSample> ReadTemperatureAsync(CancellationToken ct) => Task.FromResult(new TemperatureSample(65, DateTimeOffset.UtcNow, 50, DateTimeOffset.UtcNow));
     public Task<bool> ReadFullSpeedAsync(CancellationToken ct) => Task.FromResult(fullSpeed);
     public Task<FanWriteResult> SetFullSpeedAsync(bool enabled, CancellationToken ct) { var result = fullSpeed == enabled ? FanWriteResult.AlreadyInRequestedState : FanWriteResult.Changed; fullSpeed = enabled; return Task.FromResult(result); }
 }
@@ -332,7 +343,7 @@ internal sealed class PreviewHardware : IFanHardware
 
 internal sealed class AsyncPreviewHardware : IFanHardware
 {
-    public async Task<TemperatureSample> ReadTemperatureAsync(CancellationToken ct) { await Task.Delay(100, ct).ConfigureAwait(false); return new TemperatureSample(65, DateTimeOffset.UtcNow); }
+    public async Task<TemperatureSample> ReadTemperatureAsync(CancellationToken ct) { await Task.Delay(100, ct).ConfigureAwait(false); return new TemperatureSample(65, DateTimeOffset.UtcNow, 50, DateTimeOffset.UtcNow); }
     public async Task<bool> ReadFullSpeedAsync(CancellationToken ct) { await Task.Delay(100, ct).ConfigureAwait(false); return false; }
     public Task<FanWriteResult> SetFullSpeedAsync(bool enabled, CancellationToken ct) => throw new InvalidOperationException("Async smoke test cannot write hardware.");
 }
@@ -342,7 +353,7 @@ internal sealed class AsyncPreviewHardware : IFanHardware
 internal sealed class UxPreviewHardware : IFanHardware
 {
     internal bool FullSpeed; internal double Temperature = 90; internal int Reads, Samples, OffWrites;
-    public async Task<TemperatureSample> ReadTemperatureAsync(CancellationToken ct) { Samples++; await Task.Delay(25, ct).ConfigureAwait(false); return new(Temperature, DateTimeOffset.UtcNow); }
+    public async Task<TemperatureSample> ReadTemperatureAsync(CancellationToken ct) { Samples++; await Task.Delay(25, ct).ConfigureAwait(false); return new(Temperature, DateTimeOffset.UtcNow, 50, DateTimeOffset.UtcNow); }
     public async Task<bool> ReadFullSpeedAsync(CancellationToken ct) { Reads++; await Task.Delay(25, ct).ConfigureAwait(false); return FullSpeed; }
     public Task<FanWriteResult> SetFullSpeedAsync(bool value, CancellationToken ct) { if (!value) OffWrites++; var result = value == FullSpeed ? FanWriteResult.AlreadyInRequestedState : FanWriteResult.Changed; FullSpeed = value; return Task.FromResult(result); }
 }

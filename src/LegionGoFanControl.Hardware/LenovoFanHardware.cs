@@ -9,6 +9,10 @@ public sealed class LenovoFanHardware : IFanHardware
     private readonly SemaphoreSlim gate = new(1, 1);
     private readonly TimeSpan timeout;
     private volatile bool faulted;
+    private volatile bool ssdFaulted;
+    private readonly SemaphoreSlim ssdGate = new(1, 1);
+    private Task<(SystemSsdTemperature.Reading Reading, DateTimeOffset Time)>? ssdRead;
+    private (SystemSsdTemperature.Reading Reading, DateTimeOffset Time)? lastSsd;
     public LenovoFanHardware(TimeSpan? timeout = null) => this.timeout = timeout ?? TimeSpan.FromSeconds(5);
 
     private async Task<T> ExecuteAsync<T>(Func<CancellationToken, T> operation, CancellationToken cancellationToken)
@@ -22,14 +26,47 @@ public sealed class LenovoFanHardware : IFanHardware
         catch (TimeoutException) { faulted = true; try { deadline.Cancel(); } catch (ObjectDisposedException) { } throw new TimeoutException("WMI operation timed out. Its outcome may be unknown; this adapter is disabled until restart."); }
         catch (OperationCanceledException) { if (!task.IsCompleted) faulted = true; throw; }
     }
-    public Task<TemperatureSample> ReadTemperatureAsync(CancellationToken cancellationToken) => ExecuteAsync(_ =>
+    public async Task<TemperatureSample> ReadTemperatureAsync(CancellationToken cancellationToken)
     {
-        Exception? primaryError = null;
-        try { return new TemperatureSample(WmiProtocol.Temperature(WmiProtocol.Call("LENOVO_GAMEZONE_DATA", "GetCPUTemp", null, "Data")), DateTimeOffset.UtcNow); }
-        catch (Exception ex) { primaryError = ex; }
-        try { return new TemperatureSample(WmiProtocol.Temperature(WmiProtocol.Feature(0x05040000)), DateTimeOffset.UtcNow); }
-        catch (Exception ex) { throw new InvalidOperationException("Both CPU temperature routes failed.", new AggregateException(primaryError!, ex)); }
-    }, cancellationToken);
+        double cpu = double.NaN; string? cpuError = null; double? ssd = null; string? ssdError = null;
+        await ssdGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (!ssdFaulted && ssdRead is null)
+                ssdRead = Task.Run(() => (SystemSsdTemperature.Read(), DateTimeOffset.UtcNow)).WaitAsync(TimeSpan.FromSeconds(3));
+        }
+        finally { ssdGate.Release(); }
+        try
+        {
+            cpu = await ExecuteAsync(_ =>
+            {
+                try { return WmiProtocol.Temperature(WmiProtocol.Call("LENOVO_GAMEZONE_DATA", "GetCPUTemp", null, "Data")); }
+                catch { return WmiProtocol.Temperature(WmiProtocol.Feature(0x05040000)); }
+            }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception ex) { cpuError = "CPU temperature unavailable: " + ex.Message; }
+        DateTimeOffset cpuTime = DateTimeOffset.UtcNow;
+        await ssdGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (ssdFaulted) ssdError = "System SSD reader timed out; restart is required.";
+            else if (ssdRead is null || !ssdRead.IsCompleted)
+            {
+                if (lastSsd is { } previous) ssd = previous.Reading.CompositeCelsius;
+                else ssdError = "System SSD temperature query is pending.";
+            }
+            else
+            {
+                try { lastSsd = await ssdRead.ConfigureAwait(false); ssd = lastSsd.Value.Reading.CompositeCelsius; }
+                catch (TimeoutException) { ssdFaulted = true; lastSsd = null; ssdError = "System SSD reader timed out; restart is required."; }
+                catch (Exception ex) { lastSsd = null; ssdError = "System SSD temperature unavailable: " + ex.Message; }
+                finally { ssdRead = null; }
+            }
+        }
+        finally { ssdGate.Release(); }
+        return new TemperatureSample(cpu, cpuTime, ssd, ssd.HasValue ? lastSsd?.Time : null, ssdError, cpuError);
+    }
     public Task<bool> ReadFullSpeedAsync(CancellationToken cancellationToken) => ExecuteAsync(_ => WmiProtocol.FullSpeed(), cancellationToken);
     public Task<FanWriteResult> SetFullSpeedAsync(bool enabled, CancellationToken cancellationToken) => ExecuteAsync(operationToken =>
     {

@@ -2,6 +2,19 @@ using System.Text.Json;
 using LegionGoFanControl.Hardware;
 using LegionGoFanControl.Core;
 
+if (args.Length == 1 && args[0] == "read-ssd")
+{
+    try
+    {
+        var reading = await Task.Run(() => SystemSsdTemperature.Read(true)).WaitAsync(TimeSpan.FromSeconds(5));
+        Console.WriteLine($"Windows disk: PhysicalDrive{reading.DiskNumber}");
+        Console.WriteLine($"NVMe SMART composite temperature: {reading.CompositeCelsius:F1} °C");
+        Console.WriteLine($"Advertised warning threshold: {(reading.WarningCelsius is double w ? $"{w:F1} °C" : "unavailable")}");
+        Console.WriteLine($"Advertised critical threshold: {(reading.CriticalCelsius is double c ? $"{c:F1} °C" : "unavailable")}");
+        return 0;
+    }
+    catch (Exception ex) { Console.Error.WriteLine($"SSD read failed: {ex.Message}"); return 1; }
+}
 if (args.Length == 0 || (args.Length == 1 && args[0] == "diagnostics"))
 {
     try { Console.WriteLine(JsonSerializer.Serialize(await LenovoDiagnostics.CollectAsync(), new JsonSerializerOptions { WriteIndented = true })); return 0; }
@@ -34,5 +47,5 @@ if (args.Length == 2 && args[0] == "test-full-speed" && args[1] == "--confirm-ha
         return 1;
     }
 }
-Console.Error.WriteLine("Usage: diagnostics | test-full-speed --confirm-hardware-write | test-full-speed-modes --confirm-hardware-write");
+Console.Error.WriteLine("Usage: diagnostics | read-ssd | test-full-speed --confirm-hardware-write | test-full-speed-modes --confirm-hardware-write");
 return 2;

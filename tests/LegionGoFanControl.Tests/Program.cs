@@ -4,7 +4,7 @@ using LegionGoFanControl.Hardware;
 
 var tests = new (string, Func<Task>)[]
 {
-    ("threshold and continuous cooldown", Threshold), ("oscillation resets cooldown", Oscillation),
+    ("SSD safety and cooldown", SsdSafety), ("NVMe response parsing", NvmeParsing), ("threshold and continuous cooldown", Threshold), ("oscillation resets cooldown", Oscillation),
     ("sensor failures never release", SensorFailure), ("hung sensor stops access", HungSensor), ("failed write and readback", WriteFailures),
     ("external startup and interference", Ownership), ("prewrite ownership race", OwnershipRace), ("shutdown and resume", Lifecycle),
     ("manual and firmware modes", Modes), ("validation", Validation), ("serialized access", Concurrent), ("bounded logging", Logging), ("missing startup task lookup", MissingStartupTask), ("startup task identity", StartupIdentity), ("Full Speed operation", HardwareWrite)
@@ -50,6 +50,30 @@ static Task StartupIdentity()
     return Task.CompletedTask;
 }
 static void Check(bool value, string message) { if (!value) throw new Exception(message); }
+static async Task SsdSafety()
+{
+    var (c,h,t) = Setup(); h.Ssd=70; await c.TickAsync(); Check(h.On, "hot SSD activates");
+    h.Ssd=50; await c.TickAsync(); for (int i=0;i<15;i++) { t.Advance(2); await c.TickAsync(); } Check(!h.On, "both cool release");
+    h.Temp=80; h.SsdError="unavailable"; await c.TickAsync(); Check(h.On && c.Snapshot.SsdError is not null, "CPU activates despite SSD error");
+    h.Temp=60; t.Advance(40); await c.TickAsync(); Check(h.On, "missing SSD cannot release");
+    h.SsdError=null; h.Ssd=double.NaN; await c.TickAsync(); Check(h.On, "invalid SSD cannot release");
+    h.Ssd=50; h.SsdStale=true; await c.TickAsync(); Check(h.On, "stale SSD cannot release");
+    var (c2,h2,_)=Setup(true); h2.Ssd=75; await c2.TickAsync(); Check(h2.On && h2.Writes==0, "already enabled and hot SSD retained");
+    var (c3,h3,_3)=Setup(); h3.CpuError="CPU unavailable"; h3.Ssd=75; await c3.TickAsync(); Check(h3.On, "SSD activates despite CPU error");
+    await c3.SuspendAsync(); Check(h3.On, "hot SSD prevents suspend release");
+    var (c4,h4,_4)=Setup(); h4.Ssd=75; await c4.TickAsync(); await c4.SetModeAsync(ControllerMode.Firmware); await c4.ShutdownAsync(); Check(h4.On, "hot SSD prevents firmware and shutdown release");
+    var (c5,h5,t5)=Setup(); h5.Ssd=75; await c5.TickAsync(); h5.Ssd=50; t5.Advance(2); await c5.TickAsync(); for (int i=0;i<10;i++) { t5.Advance(2); await c5.TickAsync(); } h5.SsdError="missing"; t5.Advance(2); await c5.TickAsync(); h5.SsdError=null; t5.Advance(2); await c5.TickAsync(); for (int i=0;i<14;i++) { t5.Advance(2); await c5.TickAsync(); } Check(h5.On, "SSD error resets cooldown"); t5.Advance(2); await c5.TickAsync(); Check(!h5.On, "full cooldown after recovery");
+    var options=System.Text.Json.JsonSerializer.Deserialize<ControllerOptions>("{\"OnTemperature\":80,\"OffTemperature\":70}")!; Check(options.SsdOnTemperature==70 && options.SsdOffTemperature==60, "old settings defaults");
+    try { new ControllerOptions { SsdOffTemperature=70 }.Validate(); throw new Exception("accepted equal SSD thresholds"); } catch (ArgumentOutOfRangeException) { }
+}
+static Task NvmeParsing()
+{
+    var data=new byte[560]; var b=data.AsSpan(); System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(b,48); System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(b[4..],48); System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(b[8..],3); System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(b[12..],2); System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(b[24..],40); System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(b[28..],512); System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(b[49..],323);
+    Check(Math.Abs(SystemSsdTemperature.ParseComposite(data)-49.85)<0.01, "composite conversion");
+    b[49]=0; b[50]=0; try { SystemSsdTemperature.ParseComposite(data); throw new Exception("accepted missing temperature"); } catch (InvalidOperationException) { }
+    try { SystemSsdTemperature.ParseComposite(data.AsSpan(0,50)); throw new Exception("accepted truncated data"); } catch (InvalidOperationException) { }
+    return Task.CompletedTask;
+}
 static (FanController c, Fake h, Clock clock) Setup(bool initial = false)
 {
     var clock = new Clock(); var h = new Fake(clock) { On = initial }; return (new FanController(h, timeProvider: clock), h, clock);
@@ -93,24 +117,30 @@ static async Task WriteFailures()
 }
 static async Task Ownership()
 {
-    var(c,h,t)=Setup(true);h.Temp=65;await c.TickAsync();t.Advance(40);await c.TickAsync();await c.ShutdownAsync();Check(h.On && h.Writes==0,"preserve external on");
+    var(c,h,t)=Setup(true); h.Temp=65; await c.TickAsync(); Check(c.Snapshot.OwnsFullSpeed && h.Writes==0,"adopt startup on without write");
+    for(int i=0;i<14;i++){t.Advance(2);await c.TickAsync();} Check(h.On,"startup on remains during cooldown"); t.Advance(2); await c.TickAsync(); Check(!h.On && h.Writes==1,"startup on releases after continuous cooldown");
+    var(hot,hh,ht)=Setup(true); hh.Temp=90; await hot.TickAsync(); for(int i=0;i<20;i++){ht.Advance(2);await hot.TickAsync();} Check(hh.On && hh.Writes==0,"hot startup retained");
+    hh.Temp=70; ht.Advance(2); await hot.TickAsync(); for(int i=0;i<10;i++){ht.Advance(2);await hot.TickAsync();} hh.Temp=75; ht.Advance(2); await hot.TickAsync(); hh.Temp=70; ht.Advance(2); await hot.TickAsync(); for(int i=0;i<14;i++){ht.Advance(2);await hot.TickAsync();} Check(hh.On,"hysteresis resets startup cooldown"); ht.Advance(2); await hot.TickAsync(); Check(!hh.On,"release after restarted cooldown");
+    var(external,eh,et)=Setup(); await external.TickAsync(); eh.On=true; await external.TickAsync(); Check(external.Snapshot.OwnsFullSpeed,"adopt externally enabled state"); for(int i=0;i<15;i++){et.Advance(2);await external.TickAsync();} Check(!eh.On,"release observed external state after cooldown");
+    var(failed,fh,ft)=Setup(true); fh.FailTemp=true; await failed.TickAsync(); ft.Advance(40); await failed.TickAsync(); await failed.ShutdownAsync(); Check(fh.On && fh.Writes==0,"sensor failure retains adopted startup state");
     var(c2,h2,_)=Setup();h2.Temp=90;await c2.TickAsync();h2.On=false;await c2.TickAsync();await c2.TickAsync();Check(h2.Writes==1 && c2.Snapshot.State==ControllerState.Interference,"external change");
 }
 static async Task OwnershipRace()
 {
-    var(c,h,_)=Setup(); h.Temp=90; h.RaceOn=true; await c.TickAsync();
-    Check(h.On && !c.Snapshot.OwnsFullSpeed && c.Snapshot.State==ControllerState.ExternalFullSpeed,"prewrite race must not acquire ownership");
-    await c.ShutdownAsync(); Check(h.On && h.Writes==1,"shutdown preserves externally enabled fan");
+    var(c,h,t)=Setup(); h.Temp=90; h.RaceOn=true; await c.TickAsync();
+    Check(h.On && c.Snapshot.OwnsFullSpeed && c.Snapshot.State==ControllerState.FullSpeed,"automatic prewrite race adopted");
+    h.RaceOn=false; h.Temp=70; t.Advance(2); await c.TickAsync(); for(int i=0;i<15;i++){t.Advance(2);await c.TickAsync();} Check(!h.On,"race state released after cooldown");
 }
 static async Task Lifecycle()
 {
-    var(c,h,_)=Setup();h.Temp=90;await c.TickAsync();await c.ShutdownAsync();Check(!h.On && h.Writes==2,"release owned on shutdown");
-    var(c2,h2,_2)=Setup();h2.Temp=90;await c2.TickAsync();await c2.SuspendAsync();await c2.ResumeAsync();h2.Temp=60;await c2.TickAsync();await c2.ShutdownAsync();Check(h2.On,"hot suspend retains full speed");
+    var(c,h,_)=Setup();h.Temp=90;await c.TickAsync();await c.ShutdownAsync();Check(h.On && h.Writes==1,"hot shutdown retains fan");
+    var(c2,h2,_2)=Setup();h2.Temp=90;await c2.TickAsync();await c2.SuspendAsync();await c2.ResumeAsync();h2.Temp=60;await c2.TickAsync();await c2.ShutdownAsync();Check(!h2.On,"resume adopts retained full speed and shutdown releases with fresh telemetry");
+    var(disabled,dh,_d)=Setup(true); dh.Temp=90; await disabled.TickAsync(); await disabled.SetModeAsync(ControllerMode.Firmware); await disabled.ShutdownAsync(); Check(dh.On && dh.Writes==0,"hot disable and shutdown retain fan");
     var(c3,h3,_3)=Setup();h3.Temp=90;await c3.TickAsync();h3.Temp=60;await c3.TickAsync();await c3.SuspendAsync();Check(!h3.On && h3.Writes==2,"cool suspend releases owned fan");await c3.ResumeAsync();Check(!h3.On,"resume preserves firmware control");
 }
 static async Task Modes()
 {
-    var(c,h,_)=Setup();h.FailTemp=true;await c.SetModeAsync(ControllerMode.ManualFullSpeed);Check(h.On,"manual without sensor");await c.SetModeAsync(ControllerMode.Firmware);Check(!h.On,"firmware releases owned");
+    var(c,h,_)=Setup();h.FailTemp=true;await c.SetModeAsync(ControllerMode.ManualFullSpeed);Check(h.On,"manual without sensor");await c.SetModeAsync(ControllerMode.Firmware);Check(h.On,"firmware retains without safe telemetry");
 }
 static Task Validation()
 {
@@ -165,8 +195,8 @@ sealed class Clock : TimeProvider
 }
 sealed class Fake(Clock clock) : IFanHardware
 {
-    public double Temp=65; public bool On, FailTemp, FailWrite, Disagree, Stale, Hang, RaceOn; public int Writes, FanReads;
-    public Task<TemperatureSample> ReadTemperatureAsync(CancellationToken ct) => Hang ? new TaskCompletionSource<TemperatureSample>().Task : FailTemp ? Task.FromException<TemperatureSample>(new Exception("sensor failure")) : Task.FromResult(new TemperatureSample(Temp, clock.GetUtcNow() - (Stale ? TimeSpan.FromSeconds(20) : TimeSpan.Zero)));
+    public double Temp=65, Ssd=50; public string? SsdError, CpuError; public bool SsdStale, On, FailTemp, FailWrite, Disagree, Stale, Hang, RaceOn; public int Writes, FanReads;
+    public Task<TemperatureSample> ReadTemperatureAsync(CancellationToken ct) => Hang ? new TaskCompletionSource<TemperatureSample>().Task : FailTemp ? Task.FromException<TemperatureSample>(new Exception("sensor failure")) : Task.FromResult(new TemperatureSample(Temp, clock.GetUtcNow() - (Stale ? TimeSpan.FromSeconds(20) : TimeSpan.Zero), Ssd, clock.GetUtcNow() - (SsdStale ? TimeSpan.FromSeconds(20) : TimeSpan.Zero), SsdError, CpuError));
     public Task<bool> ReadFullSpeedAsync(CancellationToken ct) { FanReads++; return Task.FromResult(On); }
     public Task<FanWriteResult> SetFullSpeedAsync(bool enabled,CancellationToken ct) { Writes++; if(FailWrite) throw new Exception("write failed"); if(RaceOn) { On=enabled; return Task.FromResult(FanWriteResult.AlreadyInRequestedState); } if(!Disagree) On=enabled; return Task.FromResult(FanWriteResult.Changed); }
 }

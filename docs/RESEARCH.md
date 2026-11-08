@@ -1,6 +1,6 @@
 # Hardware and protocol research
 
-Research date: 2026-11-01. Evidence is separated below into source review, device read-only observations, and an approved hardware write test. The target is model **83E1**, family **Legion Go 8APU1**, BIOS **N3CN40WW**. Read-only CIM identified the device; an administrator-token run read Lenovo WMI metadata and telemetry. An operator-approved controlled cross-mode test recorded higher raw fan medians while Full Speed was enabled in Quiet, Balanced, Performance, and Custom. Automatic thermal control and live thermal stress remain untested.
+Research date: 2026-11-01. Evidence is separated below into source review, device read-only observations, and an approved hardware write test. The target is model **83E1**, family **Legion Go 8APU1**, BIOS **N3CN40WW**. Read-only CIM identified the device; an administrator-token run read Lenovo WMI metadata and telemetry. An operator-approved controlled cross-mode test recorded higher raw fan medians while Full Speed was enabled in Quiet, Balanced, Performance, and Custom. The new SSD-driven automatic policy has not been validated under live thermal stress.
 
 ## Device read-only observation
 
@@ -28,4 +28,4 @@ This repository independently implements the protocol from these documented iden
 
 ## Remaining validation
 
-Manual Full Speed activation, readback, and restoration passed once in the approved test above. Cross-mode evidence applies only to N3CN40WW and cool/low-load observations; automatic thermal control and other BIOS versions remain unvalidated. Automatic thermal control remains untested. Do not infer long-term behavior from one successful operation. Sensor freshness under load, coexistence with other utilities, suspend/resume behavior, and behavior across BIOS/Legion Space versions remain open.
+Manual Full Speed activation, readback, and restoration passed once in the approved test above. Cross-mode evidence applies only to N3CN40WW and cool/low-load observations; automatic thermal control and other BIOS versions remain unvalidated. SSD-driven automatic control under live thermal stress remains unvalidated. Do not infer long-term behavior from one successful operation. Sensor freshness under load, coexistence with other utilities, suspend/resume behavior, and behavior across BIOS/Legion Space versions remain open.
